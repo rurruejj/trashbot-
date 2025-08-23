@@ -70,9 +70,7 @@ def _tab_url(base_url: str, tab: str) -> str:
 def miniapp_kb_for(user_id: int) -> types.InlineKeyboardMarkup:
     base_url = _miniapp_url_for_user(user_id)
     kb = InlineKeyboardBuilder()
-    kb.button(text="Открыть мини-приложение", web_app=WebAppInfo(url=base_url))
-    kb.button(text="Заявка",  web_app=WebAppInfo(url=_tab_url(base_url, "request")))
-    kb.button(text="Тарифы",  web_app=WebAppInfo(url=_tab_url(base_url, "tariffs")))
+    kb.button(text="Меню", web_app=WebAppInfo(url=base_url))
     kb.button(text="Профиль", web_app=WebAppInfo(url=_tab_url(base_url, "profile")))
     return kb.as_markup()
 
