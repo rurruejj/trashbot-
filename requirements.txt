@@ -1,4 +1,7 @@
 aiogram==3.22.0
 aiohttp==3.9.1
 python-dotenv==1.0.1
+sqlite3-binary
+fastapi
+uvicorn
 

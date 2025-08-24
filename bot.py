@@ -6,16 +6,15 @@ import html
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery, FSInputFile, WebAppInfo
-from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.enums import ParseMode, ContentType
+from aiogram.enums import ParseMode
 
 from db import (
     init_db, save_user_info, get_user_info, add_request,
     mark_request_completed, clear_all_data, get_user_id_by_request_id
 )
 
-# === добавлено: HTTP сервер для профиля
 from aiohttp import web
 
 # ====== НАСТРОЙКИ ======
@@ -41,9 +40,8 @@ INTRO_CAPTIONS = [
     "До бака донесем"
 ]
 
-# Память состояний/ввода (простая FSM)
+# FSM
 user_states = {}
-user_data = {}
 
 # ====== ВСПОМОГАТЕЛЬНЫЕ ======
 def _miniapp_url_for_user(user_id: int) -> str:
@@ -119,7 +117,7 @@ async def start_handler(message: Message, bot: Bot):
         )
         return
 
-    user_states[user_id] = {"step": 0}
+    user_states[user_id] = {"step": "street"}
     await send_intro_photo(bot, user_id, 0)
 
 async def webapp_entry(message: Message, bot: Bot):
@@ -143,10 +141,7 @@ async def send_intro_photo(bot: Bot, user_id: int, idx: int):
         await bot.send_message(user_id, caption, reply_markup=kb.as_markup())
 
 async def next_photo(callback: CallbackQuery, bot: Bot):
-    try:
-        idx = int(callback.data.split(":")[1])
-    except Exception:
-        idx = 0
+    idx = int(callback.data.split(":")[1])
     await callback.answer()
     await send_intro_photo(bot, callback.from_user.id, idx)
 
@@ -167,64 +162,50 @@ async def text_handler(message: Message, bot: Bot):
         return
     step = user_states[user_id].get("step")
 
+    # 🔧 изменено: сразу сохраняем в БД
     if step == "street":
-        user_data[user_id] = {"street": message.text.strip()}
+        save_user_info(user_id, street=message.text.strip())
         user_states[user_id]["step"] = "house"
         await message.answer("Введите номер дома:")
     elif step == "house":
-        user_data[user_id]["house"] = message.text.strip()
+        save_user_info(user_id, house=message.text.strip())
         user_states[user_id]["step"] = "flat"
         await message.answer("Введите номер квартиры:")
     elif step == "flat":
-        user_data[user_id]["flat"] = message.text.strip()
+        save_user_info(user_id, flat=message.text.strip())
         user_states[user_id]["step"] = "entrance"
         await message.answer("Введите подъезд:")
     elif step == "entrance":
-        user_data[user_id]["entrance"] = message.text.strip()
+        save_user_info(user_id, entrance=message.text.strip())
         user_states[user_id]["step"] = "floor"
         await message.answer("Введите этаж:")
     elif step == "floor":
-        user_data[user_id]["floor"] = message.text.strip()
+        save_user_info(user_id, floor=message.text.strip())
         user_states[user_id]["step"] = "phone"
         await message.answer("Введите телефон:")
     elif step == "phone":
-        user_data[user_id]["phone"] = message.text.strip()
-        save_user_info(user_id, **user_data[user_id])
+        save_user_info(user_id, phone=message.text.strip())
         user_states.pop(user_id, None)
-        user_data.pop(user_id, None)
         await message.answer("✅ Адрес сохранён. Открывайте меню:", reply_markup=miniapp_kb_for(user_id))
 
 # === ПРИЁМ ДАННЫХ ИЗ МИНИ-АППА ===
 async def webapp_data_handler(message: Message, bot: Bot):
     raw = message.web_app_data.data if message.web_app_data else None
-    print("📩 WEB_APP_DATA raw:", repr(raw))
-
     if not raw:
         return
-
     try:
         data = json.loads(raw)
-        if not isinstance(data, dict):
-            return
-    except Exception as e:
-        print("❌ Ошибка парсинга WebAppData:", e)
+    except Exception:
         return
 
     if data.get("type") == "create_request":
         bags = int(data.get("bags", 1))
         comment = data.get("comment", "")
-
-        try:
-            request_id = add_request(message.from_user.id, bags, comment)
-        except Exception as e:
-            print("❌ Ошибка add_request:", e)
-            return
-
+        request_id = add_request(message.from_user.id, bags, comment)
         info = get_user_info(message.from_user.id) or {}
         addr  = _format_address(info)
         phone = info.get("phone") or "—"
         uname = _format_user_link(message.from_user)
-
         admin_text = (
             "🧺 <b>Заявка</b>\n"
             f"Пакеты: <b>{bags}</b>\n"
@@ -232,52 +213,31 @@ async def webapp_data_handler(message: Message, bot: Bot):
             f"Телефон: {phone}\n"
             f"Юзернейм: {uname}"
         )
-
         kb = InlineKeyboardBuilder()
         kb.button(text="✅ Забрал мусор", callback_data=f"complete:{request_id}")
-
-        await bot.send_message(
-            ADMIN_ID,
-            admin_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.as_markup()
-        )
+        await bot.send_message(ADMIN_ID, admin_text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
         await message.answer("✅ Заявка отправлена администратору.")
 
 async def complete_request(callback: CallbackQuery, bot: Bot):
-    try:
-        parts = callback.data.split(":")
-        if len(parts) != 2:
-            return
-        request_id = int(parts[1])
-
-        mark_request_completed(request_id)
-        await callback.answer("Заявка отмечена выполненной ✅")
-
-        user_id = get_user_id_by_request_id(request_id)
-        if user_id:
-            await bot.send_message(user_id, "✅ Ваша заявка выполнена. Мусор вынесен.")
-
-        await bot.edit_message_reply_markup(
-            chat_id=callback.message.chat.id,
-            message_id=callback.message.message_id,
-            reply_markup=None
-        )
-
-    except Exception as e:
-        print("complete_request error:", e)
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    request_id = int(parts[1])
+    mark_request_completed(request_id)
+    await callback.answer("Заявка отмечена выполненной ✅")
+    user_id = get_user_id_by_request_id(request_id)
+    if user_id:
+        await bot.send_message(user_id, "✅ Ваша заявка выполнена.")
+    await bot.edit_message_reply_markup(callback.message.chat.id, callback.message.message_id, reply_markup=None)
 
 async def clear_command_handler(message: Message, bot: Bot):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔️ У вас нет доступа к этой команде.")
-        return
-
+        return await message.answer("⛔️ У вас нет доступа к этой команде.")
     clear_all_data()
     user_states.clear()
-    user_data.clear()
-    await message.answer("✅ Все данные очищены. Все пользователи начнут с начала.")
+    await message.answer("✅ Все данные очищены.")
 
-# === ДОБАВЛЕНО: HTTP эндпоинт для профиля ===
+# === HTTP эндпоинт для профиля ===
 async def http_get_user(request: web.Request):
     user_id_raw = request.query.get("user_id")
     try:
@@ -286,20 +246,14 @@ async def http_get_user(request: web.Request):
         return web.json_response({"ok": False, "error": "bad user_id"}, status=400)
 
     info = get_user_info(user_id) or {}
-    name = ((info.get("first_name") or "") + (" " + info.get("last_name") if info.get("last_name") else "")).strip()
-    if not name:
-        name = "—"
-    username = info.get("username") or "—"
-    phone = info.get("phone") or "—"
-    address = _format_address(info)
-
+    name = ((info.get("first_name") or "") + (" " + info.get("last_name") if info.get("last_name") else "")).strip() or "—"
     return web.json_response({
         "ok": True,
         "profile": {
             "name": name,
-            "username": username,
-            "phone": phone,
-            "address": address
+            "username": info.get("username") or "—",
+            "phone": info.get("phone") or "—",
+            "address": _format_address(info)
         }
     })
 
@@ -319,7 +273,7 @@ async def main():
     dp.callback_query.register(pd_ok, F.data == "pd_ok")
     dp.callback_query.register(complete_request, F.data.startswith("complete:"))
 
-    # === HTTP-сервер
+    # 🔧 запускаем HTTP и бота параллельно
     app = web.Application()
     app.router.add_get("/get_user", http_get_user)
     runner = web.AppRunner(app)
@@ -328,7 +282,8 @@ async def main():
     await site.start()
     print("HTTP server started")
 
-    await dp.start_polling(bot)
+    # Параллельный запуск
+    await asyncio.gather(dp.start_polling(bot))
 
 if __name__ == "__main__":
     asyncio.run(main())
